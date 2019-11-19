@@ -3,10 +3,9 @@
 from __future__ import print_function
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from cpython cimport PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE, \
-                     Py_buffer, PyBytes_AsString
+    Py_buffer, PyBytes_AsString
 
 from .python cimport PyMemoryView_Check, PyMemoryView_GET_BUFFER
-
 
 from .errors import (HttpParserError,
                      HttpParserCallbackError,
@@ -16,26 +15,24 @@ from .errors import (HttpParserError,
                      HttpParserUpgrade)
 
 cimport cython
-from . cimport cparser
-
+from .cimport cparser
 
 __all__ = ('HttpRequestParser', 'HttpResponseParser', 'parse_url')
 
-
 @cython.internal
 cdef class HttpParser:
-
     cdef:
-        cparser.http_parser* _cparser
-        cparser.http_parser_settings* _csettings
+        cparser.http_parser*_cparser
+        cparser.http_parser_settings*_csettings
+        cparser.http_parser_type mode
 
         bytes _current_header_name
         bytes _current_header_value
 
         _proto_on_url, _proto_on_status, _proto_on_body, \
-        _proto_on_header, _proto_on_headers_complete, \
-        _proto_on_message_complete, _proto_on_chunk_header, \
-        _proto_on_chunk_complete, _proto_on_message_begin
+            _proto_on_header, _proto_on_headers_complete, \
+            _proto_on_message_complete, _proto_on_chunk_header, \
+            _proto_on_chunk_complete, _proto_on_message_begin
 
         object _last_error
 
@@ -43,12 +40,12 @@ cdef class HttpParser:
 
     def __cinit__(self):
         self._cparser = <cparser.http_parser*> \
-                                PyMem_Malloc(sizeof(cparser.http_parser))
+            PyMem_Malloc(sizeof(cparser.http_parser))
         if self._cparser is NULL:
             raise MemoryError()
 
         self._csettings = <cparser.http_parser_settings*> \
-                                PyMem_Malloc(sizeof(cparser.http_parser_settings))
+            PyMem_Malloc(sizeof(cparser.http_parser_settings))
         if self._csettings is NULL:
             raise MemoryError()
 
@@ -56,15 +53,18 @@ cdef class HttpParser:
         PyMem_Free(self._cparser)
         PyMem_Free(self._csettings)
 
-    cdef _init(self, protocol, cparser.http_parser_type mode):
-        cparser.http_parser_init(self._cparser, mode)
-        self._cparser.data = <void*>self
+    cdef _set_mode(self, cparser.http_parser_type mode):
+        self.mode = mode
 
-        cparser.http_parser_settings_init(self._csettings)
+    cdef _init(self):
 
+        cparser.http_parser_init(self._cparser, self.mode)
+        self._cparser.data = <void*> self
         self._current_header_name = None
         self._current_header_value = None
 
+    cdef _hook(self, protocol):
+        cparser.http_parser_settings_init(self._csettings)
         self._proto_on_header = getattr(protocol, 'on_header', None)
         if self._proto_on_header is not None:
             self._csettings.on_header_field = cb_on_header_field
@@ -130,7 +130,7 @@ cdef class HttpParser:
 
     cdef _on_chunk_header(self):
         if (self._current_header_value is not None or
-            self._current_header_name is not None):
+                self._current_header_name is not None):
             raise HttpParserError('invalid headers state')
 
         if self._proto_on_chunk_header is not None:
@@ -145,14 +145,17 @@ cdef class HttpParser:
     ### Public API ###
 
     def get_http_version(self):
-        cdef cparser.http_parser* parser = self._cparser
+        cdef cparser.http_parser*parser = self._cparser
         return '{}.{}'.format(parser.http_major, parser.http_minor)
+
+    def reset(self):
+        self._init()
 
     def should_keep_alive(self):
         return bool(cparser.http_should_keep_alive(self._cparser))
 
     def should_upgrade(self):
-        cdef cparser.http_parser* parser = self._cparser
+        cdef cparser.http_parser*parser = self._cparser
         return bool(parser.upgrade)
 
     def feed_data(self, data):
@@ -163,28 +166,28 @@ cdef class HttpParser:
 
         if PyMemoryView_Check(data):
             buf = PyMemoryView_GET_BUFFER(data)
-            data_len = <size_t>buf.len
+            data_len = <size_t> buf.len
             nb = cparser.http_parser_execute(
                 self._cparser,
                 self._csettings,
-                <char*>buf.buf,
+                <char*> buf.buf,
                 data_len)
 
         else:
             buf = &self.py_buf
             PyObject_GetBuffer(data, buf, PyBUF_SIMPLE)
-            data_len = <size_t>buf.len
+            data_len = <size_t> buf.len
 
             nb = cparser.http_parser_execute(
                 self._cparser,
                 self._csettings,
-                <char*>buf.buf,
+                <char*> buf.buf,
                 data_len)
 
             PyBuffer_Release(buf)
 
         if self._cparser.http_errno != cparser.HPE_OK:
-            ex =  parser_error_from_errno(
+            ex = parser_error_from_errno(
                 <cparser.http_errno> self._cparser.http_errno)
             if isinstance(ex, HttpParserCallbackError):
                 if self._last_error is not None:
@@ -198,37 +201,34 @@ cdef class HttpParser:
         if nb != data_len:
             raise HttpParserError('not all of the data was parsed')
 
-
 cdef class HttpRequestParser(HttpParser):
-
     def __init__(self, protocol):
-        self._init(protocol, cparser.HTTP_REQUEST)
-
+        self._set_mode(cparser.HTTP_REQUEST)
+        self._init()
+        self._hook(protocol)
         self._proto_on_url = getattr(protocol, 'on_url', None)
         if self._proto_on_url is not None:
             self._csettings.on_url = cb_on_url
 
     def get_method(self):
-        cdef cparser.http_parser* parser = self._cparser
+        cdef cparser.http_parser*parser = self._cparser
         return cparser.http_method_str(<cparser.http_method> parser.method)
 
-
 cdef class HttpResponseParser(HttpParser):
-
     def __init__(self, protocol):
-        self._init(protocol, cparser.HTTP_RESPONSE)
-
+        self._set_mode(cparser.HTTP_RESPONSE)
+        self._init()
+        self._hook(protocol)
         self._proto_on_status = getattr(protocol, 'on_status', None)
         if self._proto_on_status is not None:
             self._csettings.on_status = cb_on_status
 
     def get_status_code(self):
-        cdef cparser.http_parser* parser = self._cparser
+        cdef cparser.http_parser*parser = self._cparser
         return parser.status_code
 
-
-cdef int cb_on_message_begin(cparser.http_parser* parser) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+cdef int cb_on_message_begin(cparser.http_parser*parser) except -1:
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._proto_on_message_begin()
     except BaseException as ex:
@@ -237,10 +237,9 @@ cdef int cb_on_message_begin(cparser.http_parser* parser) except -1:
     else:
         return 0
 
-
-cdef int cb_on_url(cparser.http_parser* parser,
+cdef int cb_on_url(cparser.http_parser*parser,
                    const char *at, size_t length) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._proto_on_url(at[:length])
     except BaseException as ex:
@@ -249,10 +248,9 @@ cdef int cb_on_url(cparser.http_parser* parser,
     else:
         return 0
 
-
-cdef int cb_on_status(cparser.http_parser* parser,
+cdef int cb_on_status(cparser.http_parser*parser,
                       const char *at, size_t length) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._proto_on_status(at[:length])
     except BaseException as ex:
@@ -261,10 +259,9 @@ cdef int cb_on_status(cparser.http_parser* parser,
     else:
         return 0
 
-
-cdef int cb_on_header_field(cparser.http_parser* parser,
+cdef int cb_on_header_field(cparser.http_parser*parser,
                             const char *at, size_t length) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._on_header_field(at[:length])
     except BaseException as ex:
@@ -273,10 +270,9 @@ cdef int cb_on_header_field(cparser.http_parser* parser,
     else:
         return 0
 
-
-cdef int cb_on_header_value(cparser.http_parser* parser,
+cdef int cb_on_header_value(cparser.http_parser*parser,
                             const char *at, size_t length) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._on_header_value(at[:length])
     except BaseException as ex:
@@ -285,9 +281,8 @@ cdef int cb_on_header_value(cparser.http_parser* parser,
     else:
         return 0
 
-
-cdef int cb_on_headers_complete(cparser.http_parser* parser) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+cdef int cb_on_headers_complete(cparser.http_parser*parser) except -1:
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._on_headers_complete()
     except BaseException as ex:
@@ -299,10 +294,9 @@ cdef int cb_on_headers_complete(cparser.http_parser* parser) except -1:
         else:
             return 0
 
-
-cdef int cb_on_body(cparser.http_parser* parser,
+cdef int cb_on_body(cparser.http_parser*parser,
                     const char *at, size_t length) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._proto_on_body(at[:length])
     except BaseException as ex:
@@ -311,9 +305,8 @@ cdef int cb_on_body(cparser.http_parser* parser,
     else:
         return 0
 
-
-cdef int cb_on_message_complete(cparser.http_parser* parser) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+cdef int cb_on_message_complete(cparser.http_parser*parser) except -1:
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._proto_on_message_complete()
     except BaseException as ex:
@@ -322,9 +315,8 @@ cdef int cb_on_message_complete(cparser.http_parser* parser) except -1:
     else:
         return 0
 
-
-cdef int cb_on_chunk_header(cparser.http_parser* parser) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+cdef int cb_on_chunk_header(cparser.http_parser*parser) except -1:
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._on_chunk_header()
     except BaseException as ex:
@@ -333,9 +325,8 @@ cdef int cb_on_chunk_header(cparser.http_parser* parser) except -1:
     else:
         return 0
 
-
-cdef int cb_on_chunk_complete(cparser.http_parser* parser) except -1:
-    cdef HttpParser pyparser = <HttpParser>parser.data
+cdef int cb_on_chunk_complete(cparser.http_parser*parser) except -1:
+    cdef HttpParser pyparser = <HttpParser> parser.data
     try:
         pyparser._on_chunk_complete()
     except BaseException as ex:
@@ -343,7 +334,6 @@ cdef int cb_on_chunk_complete(cparser.http_parser* parser) except -1:
         return -1
     else:
         return 0
-
 
 cdef parser_error_from_errno(cparser.http_errno errno):
     cdef bytes desc = cparser.http_errno_description(errno)
@@ -374,7 +364,6 @@ cdef parser_error_from_errno(cparser.http_errno errno):
 
     return cls(desc.decode('latin-1'))
 
-
 @cython.freelist(250)
 cdef class URL:
     cdef readonly bytes schema
@@ -387,7 +376,6 @@ cdef class URL:
 
     def __cinit__(self, bytes schema, bytes host, object port, bytes path,
                   bytes query, bytes fragment, bytes userinfo):
-
         self.schema = schema
         self.host = host
         self.port = port
@@ -400,14 +388,13 @@ cdef class URL:
         return ('<URL schema: {!r}, host: {!r}, port: {!r}, path: {!r}, '
                 'query: {!r}, fragment: {!r}, userinfo: {!r}>'
                 .format(self.schema, self.host, self.port, self.path,
-                    self.query, self.fragment, self.userinfo))
-
+                        self.query, self.fragment, self.userinfo))
 
 def parse_url(url):
     cdef:
         Py_buffer py_buf
-        char* buf_data
-        cparser.http_parser_url* parsed
+        char*buf_data
+        cparser.http_parser_url*parsed
         int res
         bytes schema = None
         bytes host = None
@@ -421,47 +408,47 @@ def parse_url(url):
         int ln
 
     parsed = <cparser.http_parser_url*> \
-                        PyMem_Malloc(sizeof(cparser.http_parser_url))
+        PyMem_Malloc(sizeof(cparser.http_parser_url))
     cparser.http_parser_url_init(parsed)
 
     PyObject_GetBuffer(url, &py_buf, PyBUF_SIMPLE)
     try:
-        buf_data = <char*>py_buf.buf
+        buf_data = <char*> py_buf.buf
         res = cparser.http_parser_parse_url(buf_data, py_buf.len, 0, parsed)
 
         if res == 0:
             if parsed.field_set & (1 << cparser.UF_SCHEMA):
-                off = parsed.field_data[<int>cparser.UF_SCHEMA].off
-                ln = parsed.field_data[<int>cparser.UF_SCHEMA].len
-                schema = buf_data[off:off+ln]
+                off = parsed.field_data[<int> cparser.UF_SCHEMA].off
+                ln = parsed.field_data[<int> cparser.UF_SCHEMA].len
+                schema = buf_data[off:off + ln]
 
             if parsed.field_set & (1 << cparser.UF_HOST):
-                off = parsed.field_data[<int>cparser.UF_HOST].off
-                ln = parsed.field_data[<int>cparser.UF_HOST].len
-                host = buf_data[off:off+ln]
+                off = parsed.field_data[<int> cparser.UF_HOST].off
+                ln = parsed.field_data[<int> cparser.UF_HOST].len
+                host = buf_data[off:off + ln]
 
             if parsed.field_set & (1 << cparser.UF_PORT):
                 port = parsed.port
 
             if parsed.field_set & (1 << cparser.UF_PATH):
-                off = parsed.field_data[<int>cparser.UF_PATH].off
-                ln = parsed.field_data[<int>cparser.UF_PATH].len
-                path = buf_data[off:off+ln]
+                off = parsed.field_data[<int> cparser.UF_PATH].off
+                ln = parsed.field_data[<int> cparser.UF_PATH].len
+                path = buf_data[off:off + ln]
 
             if parsed.field_set & (1 << cparser.UF_QUERY):
-                off = parsed.field_data[<int>cparser.UF_QUERY].off
-                ln = parsed.field_data[<int>cparser.UF_QUERY].len
-                query = buf_data[off:off+ln]
+                off = parsed.field_data[<int> cparser.UF_QUERY].off
+                ln = parsed.field_data[<int> cparser.UF_QUERY].len
+                query = buf_data[off:off + ln]
 
             if parsed.field_set & (1 << cparser.UF_FRAGMENT):
-                off = parsed.field_data[<int>cparser.UF_FRAGMENT].off
-                ln = parsed.field_data[<int>cparser.UF_FRAGMENT].len
-                fragment = buf_data[off:off+ln]
+                off = parsed.field_data[<int> cparser.UF_FRAGMENT].off
+                ln = parsed.field_data[<int> cparser.UF_FRAGMENT].len
+                fragment = buf_data[off:off + ln]
 
             if parsed.field_set & (1 << cparser.UF_USERINFO):
-                off = parsed.field_data[<int>cparser.UF_USERINFO].off
-                ln = parsed.field_data[<int>cparser.UF_USERINFO].len
-                userinfo = buf_data[off:off+ln]
+                off = parsed.field_data[<int> cparser.UF_USERINFO].off
+                ln = parsed.field_data[<int> cparser.UF_USERINFO].len
+                userinfo = buf_data[off:off + ln]
 
             return URL(schema, host, port, path, query, fragment, userinfo)
         else:
